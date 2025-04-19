@@ -66,7 +66,6 @@ def parse_cookies(file_content: str, file_type: str) -> dict:
     return cookies
 
 def extract_netflix_account_info(html: str) -> str | None:
-    # (unchanged)
     tp = re.search(
         r'"thirdPartyBillingPartner"\s*:\s*{[^}]*"value"\s*:\s*(true|false)',
         html
@@ -236,6 +235,8 @@ async def process_file(
 
         fn_m = re.search(r'"firstName"\s*:\s*"([^"]+)"', html)
         name_val = fn_m.group(1) if fn_m else None
+        if name_val:
+            name_val = bytes(name_val, 'utf-8').decode('unicode_escape')  # Fix for decoding \x20
 
         em_m = re.search(r'"emailAddress"\s*:\s*"([^"]+)"', html)
         mail = bytes(em_m.group(1), 'utf-8').decode('unicode_escape') if em_m else None
