@@ -1,0 +1,26 @@
+python3 -m venv myenv
+source myenv/bin/activate
+pip install langcodes
+
+_____________
+
+pip install requests
+
+
+________________
+
+pip install pycountry
+
+
+____________
+
+
+pip install python-dotenv
+
+____________
+
+pip install python-telegram-bot
+
+
+
+nohup python bot.py &
