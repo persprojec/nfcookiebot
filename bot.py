@@ -44,6 +44,7 @@ def parse_cookies(file_content: str, file_type: str) -> dict:
                 }
         except json.JSONDecodeError:
             pass
+
     cookies = {}
     for line in file_content.splitlines():
         line = line.strip()
@@ -54,15 +55,18 @@ def parse_cookies(file_content: str, file_type: str) -> dict:
         parts = line.split('\t')
         if len(parts) >= 7:
             cookies[parts[5]] = parts[6]
+
     if not cookies and file_content.strip():
         for pair in file_content.split(';'):
             pair = pair.strip()
             if '=' in pair:
                 name, value = pair.split('=', 1)
                 cookies[name] = value
+
     return cookies
 
 def extract_netflix_account_info(html: str) -> str | None:
+    # (unchanged)
     tp = re.search(
         r'"thirdPartyBillingPartner"\s*:\s*{[^}]*"value"\s*:\s*(true|false)',
         html
@@ -210,8 +214,16 @@ async def process_file(
         hold_m = re.search(r'"isUserOnHold"\s*:\s*(true|false)', html)
         hold = hold_m.group(1).capitalize() if hold_m else None
 
-        pd_m = re.search(r'"localizedPlanName"\s*:\s*{[^}]*"value"\s*:\s*"([^"]+)"', html)
-        plan = pd_m.group(1) if pd_m else None
+        # --- HERE: decode any \uXXXX escapes in the plan name ---
+        pd_m = re.search(
+            r'"localizedPlanName"\s*:\s*{[^}]*"value"\s*:\s*"([^"]+)"',
+            html
+        )
+        if pd_m:
+            raw_plan = pd_m.group(1)
+            plan = bytes(raw_plan, "utf-8").decode("unicode_escape")
+        else:
+            plan = None
 
         ms_m = re.search(r'"membershipStatus"\s*:\s*"([^"]+)"', html)
         membership = ms_m.group(1).replace('_', ' ').title() if ms_m else None
@@ -249,6 +261,7 @@ async def process_file(
         if lang_m:
             display_lang = langcodes.Language.get(lang_m.group(1)).display_name()
 
+        # build the response
         section = ["Account Information:"]
         section += billed_using
         if country:      section.append(f"Country: {country}")
@@ -271,7 +284,7 @@ async def process_file(
         # reply to user
         bio = io.BytesIO(content.encode('utf-8'))
         bio.seek(0)
-        new_name = f"@{bot_user}-{orig_id}.{ftype}"
+        new_name = f"@{bot_user}-{orig_id}.json"
         input_file = InputFile(bio, filename=new_name)
         await context.bot.send_document(
             chat_id=chat_id,
