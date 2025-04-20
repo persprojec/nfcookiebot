@@ -22,26 +22,22 @@ from telegram.ext import (
 
 # Load environment variables
 load_dotenv()
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
-CHANNEL_CHAT_ID = os.getenv("CHANNEL_CHAT_ID")  # Channel Chat ID
-if not TELEGRAM_TOKEN or not OWNER_CHAT_ID or not CHANNEL_CHAT_ID:
-    logging.error("Please set TELEGRAM_TOKEN, OWNER_CHAT_ID, and CHANNEL_CHAT_ID in your .env")
+TELEGRAM_TOKEN       = os.getenv("TELEGRAM_TOKEN")
+OWNER_CHAT_ID        = os.getenv("OWNER_CHAT_ID")
+CHANNEL_CHAT_ID      = os.getenv("CHANNEL_CHAT_ID")  # Channel Chat ID
+CHANNEL_INVITE_LINK  = os.getenv("CHANNEL_INVITE_LINK")
+if not (TELEGRAM_TOKEN and OWNER_CHAT_ID and CHANNEL_CHAT_ID and CHANNEL_INVITE_LINK):
+    logging.error("Please set TELEGRAM_TOKEN, OWNER_CHAT_ID, CHANNEL_CHAT_ID, and CHANNEL_INVITE_LINK in your .env")
     exit(1)
-OWNER_CHAT_ID = int(OWNER_CHAT_ID)
+OWNER_CHAT_ID   = int(OWNER_CHAT_ID)
 CHANNEL_CHAT_ID = int(CHANNEL_CHAT_ID)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Function to get the invite link of the channel
+# Helper to return the invite link from .env
 async def get_channel_invite_link(context):
-    try:
-        invite_link = await context.bot.export_chat_invite_link(CHANNEL_CHAT_ID)
-        return invite_link
-    except Exception as e:
-        logger.error(f"Error getting invite link: {e}")
-        return None
+    return CHANNEL_INVITE_LINK
 
 def parse_cookies(file_content: str, file_type: str) -> dict:
     if file_type.lower() == 'json' or file_content.lstrip().startswith('['):
@@ -131,23 +127,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             invite_link = await get_channel_invite_link(context)
-            if invite_link:
-                keyboard = [[InlineKeyboardButton("Join in channel", url=invite_link)]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                await update.message.reply_text(
-                    f"👋 Hi! {full_name}\nJoin our channel to check your Netflix‑cookies whether they’re still valid.",
-                    reply_markup=reply_markup,
-                    reply_to_message_id=update.message.message_id
-                )
-            else:
-                await update.message.reply_text(
-                    f"👋 Hi! {full_name}\nJoin our channel to check your Netflix‑cookies whether they’re still valid.",
-                    reply_to_message_id=update.message.message_id
-                )
+            keyboard = [[InlineKeyboardButton("Join our channel", url=invite_link)]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                f"👋 Hi! {full_name}\nJoin our channel to check your Netflix‑cookies whether they’re still valid.",
+                reply_markup=reply_markup,
+                reply_to_message_id=update.message.message_id
+            )
     except Exception as e:
         logger.error(f"Error checking membership for user {user_id}: {e}")
+        invite_link = await get_channel_invite_link(context)
+        keyboard = [[InlineKeyboardButton("Join our channel", url=invite_link)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
             f"👋 Hi! {full_name}\nJoin our channel to check your Netflix‑cookies whether they’re still valid.",
+            reply_markup=reply_markup,
             reply_to_message_id=update.message.message_id
         )
 
@@ -164,18 +158,21 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_member = await context.bot.get_chat_member(CHANNEL_CHAT_ID, user_id)
         if chat_member.status not in ['member', 'administrator', 'creator']:
             invite_link = await get_channel_invite_link(context)
-            if invite_link:
-                keyboard = [[InlineKeyboardButton("Join in channel", url=invite_link)]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                return await update.message.reply_text(
-                    f"👋 Hi! {full_name}\nJoin our channel to check your Netflix‑cookies whether they’re still valid.",
-                    reply_markup=reply_markup,
-                    reply_to_message_id=orig_id
-                )
+            keyboard = [[InlineKeyboardButton("Join our channel", url=invite_link)]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            return await update.message.reply_text(
+                f"👋 Hi! {full_name}\nJoin our channel to check your Netflix‑cookies whether they’re still valid.",
+                reply_markup=reply_markup,
+                reply_to_message_id=orig_id
+            )
     except Exception as e:
         logger.error(f"Error checking membership for user {user_id}: {e}")
+        invite_link = await get_channel_invite_link(context)
+        keyboard = [[InlineKeyboardButton("Join our channel", url=invite_link)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         return await update.message.reply_text(
             f"👋 Hi! {full_name}\nJoin our channel to check your Netflix‑cookies whether they’re still valid.",
+            reply_markup=reply_markup,
             reply_to_message_id=orig_id
         )
 
@@ -338,9 +335,8 @@ async def process_file(
         # Send the file back with the original extension
         bio = io.BytesIO(content.encode('utf-8'))
         bio.seek(0)
-        # Get the original file extension from the user's file
         ext = os.path.splitext(name)[1].lower()
-        new_name = f"{orig_id}{ext}"  # Keep original file extension
+        new_name = f"@{bot_user} - {orig_id}{ext}"
         input_file = InputFile(bio, filename=new_name)
         await context.bot.send_document(
             chat_id=chat_id,
