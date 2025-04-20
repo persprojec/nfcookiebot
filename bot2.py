@@ -271,10 +271,14 @@ async def process_file(
         info = extract_netflix_account_info(html)
         billed_using = info.splitlines()[1:] if info else []
 
+        # --- NEW: Extract "canChangePlan" ---
+        change_plan_m = re.search(r'"canChangePlan":\s*{\s*"fieldType":\s*"Boolean",\s*"value":\s*(true|false)}', html)
+        can_change_plan = change_plan_m.group(1).capitalize() if change_plan_m else "Unknown"
+
         hold_m = re.search(r'"isUserOnHold"\s*:\s*(true|false)', html)
         hold = hold_m.group(1).capitalize() if hold_m else None
 
-        # --- HERE: decode any \uXXXX escapes in the plan name ---
+        # --- Decode plan name ---
         pd_m = re.search(
             r'"localizedPlanName"\s*:\s*{[^}]*"value"\s*:\s*"([^"]+)"',
             html
@@ -323,7 +327,7 @@ async def process_file(
         if lang_m:
             display_lang = langcodes.Language.get(lang_m.group(1)).display_name()
 
-        # build the response
+        # Build the response
         section = ["Account Information:"]
         section += billed_using
         if country:      section.append(f"Country: {country}")
@@ -332,9 +336,10 @@ async def process_file(
             status = "Active" if hold == "False" else "On Hold"
             section.append(f"Plan status: {status}")
         if plan:         section.append(f"Plan details: {plan}")
+        section.append(f"Can change plan: {can_change_plan}")
         if next_pay:     section.append(f"Next payment: {next_pay}")
         if signup:       section.append(f"Signup D&T: {signup}")
-        if extra_slots:  section.append(f"Extra Member: {'Yes' if extra_slots=='True' else 'No'}")
+        if extra_slots:  section.append(f"Extra Slots: {extra_slots}")
         if mail:         section.append(f"Mail: {mail}")
         if phone:        section.append(f"Phone: {phone}")
         if name_val:     section.append(f"Name: {name_val}")
